@@ -258,7 +258,9 @@ game.tick = function() {
       // powtórzyć
       */
       s.omega *= s.r;
+      s.omega *= s.r;
       s.r += s.rv *t;
+      s.omega /= s.r;
       s.omega /= s.r;
       s.alpha += s.omega * t;
       s.web.length = s.r;
