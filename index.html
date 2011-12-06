@@ -1,0 +1,592 @@
+<!doctype html>
+<html>
+<head>
+<title>Spiders Can Fly!</title>
+<meta charset='utf-8'>
+<link href='http://fonts.googleapis.com/css?family=Ribeye&subset=latin-ext' rel='stylesheet' type='text/css'>
+<style>
+  html { font-family: 'Ribeye', cursive; color: #222; }
+  body { margin: 0; overflow: hidden; }
+  body, html { width: 100%; height: 100%; }
+  h1 { font-weight: normal; text-align: center; font-size: 3em; margin: 10px; padding: .3em; text-shadow: 2px 2px 0 red; position: absolute; }
+  #gui { position: absolute; bottom: 10px; left: 10px; }
+  #todo { display: none; }
+  #game { display: block; margin: 0 auto; box-shadow: 0 0 10px; }
+</style>
+</head>
+<body onload="init();" onkeydown="press(event);" onkeyup="release(event);">
+<h1>Spiders Can Fly!</h1>
+<canvas id="game" width="600" height="400"></canvas>  
+<div id="gui">
+  <div id="playing">Calories: <span id="calories">0</span></div>
+  <div id="joining"><button id="joinBtn">Join</button> as <input id="nameInput" value="Player1" /></div>
+  <div id="connecting"><button id="connectBtn">Connect</button> to <input id="addrInput" value="amt2011.pl:59103" />, or <button id="localBtn">Play locally</button></div>
+</div>
+<script type="text/javascript">  
+// physics object
+// TODO: move to game
+var phys = {};
+phys.reflect = function(p, b) {
+  return 2*b-p;
+};
+phys.spider_block_test = function(s, b, r) {
+  return (s.x - r < b.x + b.w) &&
+         (s.x + r > b.x) &&
+         (s.y - r < b.y + b.h) &&
+         (s.y + r > b.y);
+};
+function min(a,b) { return a<b?a:b; }
+function max(a,b) { return a>b?a:b; }
+phys.spider_block_overlap = function(s,b) {
+  return ( min( s.x+s.leg_radius, b.x+b.w ) - max(s.x - s.leg_radius, b.x) ) *
+         ( min( s.y+s.leg_radius, b.y+b.h ) - max(s.y - s.leg_radius, b.y) );
+};
+phys.block_block_overlap = function(a,b) {
+  var w = ( min( a.x+a.w, b.x+b.w ) - max(a.x, b.x) );
+  var h = ( min( a.y+a.h, b.y+b.h ) - max(a.y, b.y) );
+  if(w < 0 || h < 0) return 0;
+  return w*h;
+};
+phys.spider_block_reflect = function(s, b) {
+  // Obrażenia za prędkość
+  var v = Math.sqrt(s.vx*s.vx + s.vy*s.vy) - Math.sqrt(2)*s.max_speed;
+  if(v > 0) { s.damage(v/s.max_speed * 50); }
+  
+  // Projekcje na przekątne - pomogą znaleźć część bloku, gdzie odbił się pajączek
+  var ya = (s.x - b.x) * b.h / b.w + b.y;
+  var yb = (s.x - b.x) * -b.h / b.w + b.h + b.y;
+  
+  // Odbicie
+  if(s.y <= ya && s.y <= yb) {
+    s.y = phys.reflect(s.y, b.y - s.body_radius);
+    if(s.vy > 0) { s.vy = - s.vy; }
+  } else if(s.y <= ya) {
+    s.x = phys.reflect(s.x, b.x+b.w+s.body_radius);
+    if(s.vx < 0) { s.vx = - s.vx; }
+  } else if(s.y <= yb) {
+    s.x = phys.reflect(s.x, b.x-s.body_radius);
+    if(s.vx > 0) { s.vx = - s.vx; }
+  } else {
+    s.y = phys.reflect(s.y, b.y+b.h+s.body_radius);
+    if(s.vy < 0) { s.vy = - s.vy; }
+  }
+};
+phys.web_block_interact = function(s,b) {
+  var dl, dy, dx;
+  if(Math.sin(s.web.alpha) > 0) { // testuj górną krawędź
+    var dy = b.y - s.y;
+    if(dy > 0) {
+      dl = dy / Math.sin(s.web.alpha);
+      dx = dl * Math.cos(s.web.alpha) + s.x;
+      if((dx >= b.x) && (dx <= b.x + b.w) && (dl < s.web.grab)) {
+        s.web.grab = dl;
+        s.web.side = 'top';
+      }
+    }
+  } else if (Math.sin(s.web.alpha) < 0) { // testuj dolną krawędź
+    var dy = s.y - b.y - b.h;
+    if(dy > 0) {
+      dl = - dy / Math.sin(s.web.alpha);
+      dx = dl * Math.cos(s.web.alpha) + s.x;
+      if((dx >= b.x) && (dx <= b.x + b.w) && (dl < s.web.grab)) {
+        s.web.grab = dl;
+        s.web.side = 'bottom';
+      }
+    }
+  }
+  
+  if(Math.cos(s.web.alpha) > 0) { // testuj lewą krawędź
+    var dx = b.x - s.x;
+    if(dx > 0) {
+      dl = dx / Math.cos(s.web.alpha);
+      dy = dl * Math.sin(s.web.alpha) + s.y;
+      if((dy >= b.y) && (dy <= b.y + b.h) && (dl < s.web.grab)) {
+        s.web.grab = dl;
+        s.web.side = 'left';
+      }
+    }
+  } else if (Math.cos(s.web.alpha) < 0) { // testuj prawą krawędź
+    var dx = s.x - b.x - b.w;
+    if(dx > 0) {
+      dl = - dx / Math.cos(s.web.alpha);
+      dy = dl * Math.sin(s.web.alpha) + s.y;
+      if((dy >= b.y) && (dy <= b.y + b.h) && (dl < s.web.grab)) {
+        s.web.grab = dl;
+        s.web.side = 'right';
+      }
+    }
+  }
+
+}
+phys.spider_block_interact = function(s, b) {
+  if(s.walking || phys.spider_block_test(s,b,s.leg_radius)) {
+    s.walking = true;
+    if(phys.spider_block_test(s,b,s.body_radius)) {
+       phys.spider_block_reflect(s,b);
+    }
+  }
+};
+// end physics
+
+var game = {
+  g : 100, // gravitational thrust
+  t : 0.02, // tick time
+  spiders : {},
+  blocks : [],
+  actions : [],
+  step : 0
+};
+
+
+game.seed = 1;
+game.rand = function() {
+  game.seed = ( game.seed * 1140671485 + 12820163 ) % Math.pow(2,24);
+  return game.seed;
+};
+
+game.Spider = function() { };
+game.Spider.prototype = {
+  leg_radius: 20, body_radius: 5,    // spider size
+  x: 0, y: 0, vx: 0, vy: 0,          // position & velocity
+  acceleration: 500, max_speed: 100, // movement parameters
+  horizontal: 0, vertical: 0,        // desired speed
+  calories: 50, mode: 'falling',     // points and state
+};
+
+game.Spider.prototype.hang = function() {
+  this.mode = "hanging";
+  this.weaving = false;
+  this.ox = this.x + Math.cos(this.web.alpha)*this.web.length;
+  this.oy = this.y + Math.sin(this.web.alpha)*this.web.length;
+  this.r = this.web.length;
+  this.alpha = this.web.alpha;
+  this.rv = - Math.sin(this.alpha)*this.vy - Math.cos(this.alpha)*this.vx;
+  this.omega = (-Math.cos(this.alpha)*this.vy + Math.sin(this.alpha)*this.vx) / this.r;
+}
+game.Spider.prototype.fall = function() {
+  this.mode = "falling";
+  this.vx = this.omega * Math.sin(this.alpha) * this.r;
+  this.vy = -this.omega * Math.cos(this.alpha) * this.r;
+}
+
+game.Spider.prototype.damage = function(mod) {
+  this.calories -= mod;
+  if(this.calories <= 0) {
+    this.alive = false;
+    delete game.spiders[this.name];
+  }
+};
+
+game.Block = function(x,y,w,h) {
+  this.x = x; this.y = y; this.w = w; this.h = h;
+};
+game.record = function(name) {
+  var a = this.actions, li = this.actions.length-1, i;
+  if(arguments.length == 1 && li > 0 && a[li].name == name) {
+    a[li].count = (a[li].count + 1) || 2;
+  } else {
+    var args = [];
+    for(i=1; i<arguments.length; ++i) {
+      args.push(arguments[i]);
+    }
+    a.push({name:name,args:args});
+  }
+};
+// protocol
+game.tick = function() {
+  this.record('tick');
+  var s, b, i, j, t = game.t;
+  for(i in this.spiders) {
+    s = this.spiders[i];
+    if(s.weaving) {
+      s.web.length += s.max_speed * t * 2;
+      s.web.grab = Number.POSITIVE_INFINITY;
+      if(s.web.length > 250) {
+        delete s.web;
+        s.weaving = false;
+      } else {
+        for(j=0; j<this.blocks.length; ++j) {
+          phys.web_block_interact(s,this.blocks[j]);
+        }
+        if(s.web.grab <= s.web.length) {
+          s.web.length = s.web.grab;
+          s.hang();
+        }
+      }
+    }
+    if(s.mode == 'falling') {
+      s.walking = false;
+      s.vy += game.g * t;
+      for(j=0; j<this.blocks.length; ++j) {
+        b = this.blocks[j];
+        phys.spider_block_interact(s,b);
+      }
+      if(s.walking) {
+        var dv = s.acceleration * t;
+        if(s.vy > s.vertical) { s.vy -= dv; }
+        if(s.vy < s.vertical) { 
+          s.vy += dv;
+          if(s.vy > s.vertical) { s.vy = s.vertical; }
+        }
+        
+        if(s.vx > s.horizontal) { s.vx -= dv; }
+        if(s.vx < s.horizontal) { 
+          s.vx += dv;
+          if(s.vx > s.horizontal) { s.vx = s.horizontal; }
+        }
+      }
+      s.y += s.vy * t;
+      s.x += s.vx * t;
+    } else if(s.mode == 'hanging') {
+      s.omega -= Math.cos(s.alpha) * game.g * t / s.r;
+      
+      var dv = s.acceleration * t / s.r * Math.sin(-s.alpha) / 10;
+      if(s.horizontal < 0) s.omega += dv;
+      else if(s.horizontal > 0) s.omega -= dv;
+      
+      var dv = s.acceleration * t;
+      if(s.rv > s.vertical) { s.rv -= dv; }
+      if(s.rv < s.vertical) { 
+        s.rv += dv;
+        if(s.rv > s.vertical) { s.rv = s.vertical; }
+      }
+      // zastosować odbicia od ścian
+      /*
+      // sprawdzić, czy ciałko nachodzi na jakiś blok
+      // znaleźć kąt styku
+      // odwrócić pozycję
+      // powtórzyć
+      */
+      s.omega *= s.r;
+      s.r += s.rv *t;
+      s.omega /= s.r;
+      s.alpha += s.omega * t;
+      s.web.length = s.r;
+      s.web.alpha = s.alpha;
+      s.x = s.ox - s.r*Math.cos(s.alpha);
+      s.y = s.oy - s.r*Math.sin(s.alpha);
+      // zwinąć / rozwinąć segmenty
+      /*
+      // przejść przez wszystkie narożniki, wybrać te, które są pomiędzy alpha1 i alpha2
+      // posortować i wybrać pierwszy
+      // zawinąć - zmienić długość, prędkość, przesunąć alpha, zmienic czas
+      // powtórzyć
+      wrapping = true;
+      while(wrapping) {
+        wrapping = false;
+        points = [];
+        for(j=0; j<this.blocks.length; ++j) {
+          phys.web_block_wrap(s,this.blocks[j]);
+        }
+      }
+      */
+    }
+  }
+};
+game.spawn = function(name) {
+  game.record('spawn',name);
+  game.spiders[name] = new this.Spider();
+  game.spiders[name].name = name;
+  return game.spiders[name]; 
+};
+game.start = function(width, height, generator) {
+  game.record('start',width,height,generator);
+  
+  this.spiders = {};
+  this.blocks = [];
+  this.actions = [];
+  this.step = 0;
+  this.seed = 1;
+  
+  var rand = game.rand;
+  this.blocks.push(new game.Block(-width/2 - 10, -height/2 - 10, width + 20, 10));
+  this.blocks.push(new game.Block(-width/2 - 10,  height/2     , width + 20, 10));
+  this.blocks.push(new game.Block(-width/2 - 10, -height/2     ,         10, height));
+  this.blocks.push(new game.Block( width/2     , -height/2     ,         10, height));
+  switch(generator) {
+  case 0:
+    var area = width * height;
+    var fill = area / 10;
+    var filled = 0;
+    var i, j;
+    for(i=0; filled < fill; ++i) {
+      var bw = (rand() % 100) + 10;
+      var bh = (rand() % 100) + 10;
+      
+      var b = new game.Block( (rand() % (width -bw)) -  width/2,
+                              (rand() % (height-bh)) - height/2, bw, bh);
+      var ok = true;
+      for(j=0; j<game.blocks.length; ++j) {
+        if(phys.block_block_overlap(game.blocks[j], b) > 0) {
+          ok = false;
+          break;
+        }
+      }
+      if(ok) { this.blocks.push(b); filled += bw*bh; }
+    }
+    break;
+  }
+};
+game.move = function(name,h,v) {
+  game.record('move',name,h,v);
+  var s = this.spiders[name];
+  s.horizontal = 0;
+  if(h ==  1) s.horizontal += s.max_speed;
+  if(h == -1) s.horizontal -= s.max_speed;
+  s.vertical = 0;
+  if(v ==  1) s.vertical += s.max_speed;
+  if(v == -1) s.vertical -= s.max_speed;
+};
+game.shoot = function(name,alpha) {
+  game.record('shoot',name,alpha);
+  var s = this.spiders[name];
+  if(s.web) {
+    if(s.mode == 'hanging') s.fall();
+    s.weaving = false;
+    delete s.web;
+  } else {
+    s.web = { length: 0, alpha:alpha };
+    s.weaving = true;
+  }
+};
+
+var controller = {
+  ctx : undefined,
+  canvas : undefined,
+  viewport : { x:0, y:0, follow:undefined },
+  particles : { array:[] }
+};
+
+controller.update_calories = function() {
+  document.getElementById('calories').innerHTML = this.active.calories.toFixed(1);
+};
+
+controller.particles.draw = function() {
+  var i, ctx = controller.ctx;
+  for(i in this.array) {
+    var p = this.array[i];
+    ctx.fillStyle = 'red';
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,p.r,0,2*Math.PI, false);
+    ctx.fill();
+    p.x += p.vx * game.t;
+    p.y += p.vy * game.t;
+    p.vy += game.g * game.t;
+    p.r -= game.t;
+    if(p.r <= 0) delete this.array[i];
+  }
+};
+controller.particles.splash = function(object, number) {
+  var i, o = object;
+  for(i=0; i<number; ++i) {
+    var p = {
+      x:o.x + Math.random() * 10-5,
+      y:o.y + Math.random() * 10-5,
+      vx:Math.random() * o.vx * 2 - o.vx/2 + Math.random() * o.vy - o.vy/2,
+      vy:Math.random() * o.vy * 2 - o.vy/2 + Math.random() * o.vx - o.vx/2,
+      r:1 + Math.random() * 2};
+    this.array.push(p);
+  }
+};
+
+controller.viewport.draw = function () {
+  var i, ctx = controller.ctx, canvas = controller.canvas;
+  ctx.clearRect (0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(canvas.width/2, canvas.height/2);
+  ctx.translate(-this.x, -this.y);
+  
+  for(i=0; i<game.blocks.length; ++i) {
+    game.blocks[i].draw();
+  }
+  for(i in game.spiders) {
+    game.spiders[i].draw();
+  }
+  controller.particles.draw();
+  
+  ctx.restore();
+  if(this.follow) {
+    this.y += (this.follow.y - this.y)/10;
+    this.x += (this.follow.x - this.x)/10;
+  }
+};
+
+controller.run = function() {
+  game.tick();
+  controller.viewport.draw();
+  this.tid = setTimeout('controller.run()', this.tms);
+};
+
+(function() {
+  var KEY = { D: 68, W: 87, A: 65, S:83, RIGHT:39, UP:38, LEFT:37, DOWN:40, SPACE:32 };
+  var state = { left:false, right:false, up:false, down:false };
+  var last = [0,0];
+  
+  function v() {
+    var r = 0;
+    if(state.up) r -= 1;
+    if(state.down) r += 1;
+    return r;
+  }
+  
+  function h() {
+    var r = 0;
+    if(state.left) r -= 1;
+    if(state.right) r += 1;
+    return r;
+  }
+  
+  function possibly_move() {
+    var n = [h(), v()];
+    if( (n[0] != last[0]) ||
+        (n[1] != last[1]) ) {
+      last = n;
+      if(controller.active) game.move(controller.active.name,n[0],n[1]);
+    }
+  }
+  
+  function shoot() {
+    if(controller.active) {
+      var alpha;
+      if(last[0] || last[1]) alpha = Math.atan2(last[1], last[0]);
+      else alpha = - Math.PI/2;
+      game.shoot(controller.active.name,alpha);
+    }
+  }
+
+  controller.press = function(evt) {
+    var code = evt.keyCode;
+    switch(code) {
+	    case KEY.RIGHT:
+	    case KEY.D: state.right = true; break;
+	
+	    case KEY.UP:
+	    case KEY.W: state.up = true; break;
+	
+	    case KEY.LEFT:
+	    case KEY.A: state.left = true; break;
+	
+	    case KEY.DOWN: 
+	    case KEY.S: state.down = true; break;
+	    
+	    case KEY.SPACE: shoot(); break;
+    }
+    possibly_move();
+  };
+
+  controller.release = function(evt) {
+    var code = evt.keyCode;
+    switch(code) {
+	    case KEY.RIGHT:
+	    case KEY.D: state.right = false; break;
+	
+	    case KEY.UP:
+	    case KEY.W: state.up = false; break;
+	
+	    case KEY.LEFT:
+	    case KEY.A: state.left = false; break;
+	
+	    case KEY.DOWN: 
+	    case KEY.S: state.down = false; break;
+	
+	    //default: console.log('unrecognized key code: ' +code); break;
+    }
+    possibly_move();
+  };
+})();
+
+
+controller.init = function() {
+  this.tms = game.t * 1000;
+  document.getElementById('playing').style.display = 'none';
+  document.getElementById('joining').style.display = 'none';
+  document.getElementById('connecting').style.display = 'none';
+  var canvas = this.canvas = document.getElementById('game');
+  
+  /*
+  canvas.addEventListener('click', function(e) {
+    var x = e.pageX - canvas.offsetLeft + controller.viewport.x - canvas.width/2;
+    var y = e.pageY - canvas.offsetTop + controller.viewport.y - canvas.height/2;
+    console.log(x,y);
+  });*/
+  var ctx = this.ctx = canvas.getContext('2d');
+  
+  game.Spider.prototype.old_damage = game.Spider.prototype.damage;
+  game.Spider.prototype.damage  = function(n) {
+    this.old_damage(n);
+    controller.particles.splash(this, n);
+    if(this.calories <= 0) {
+      controller.active = controller.viewport.follow = undefined;
+      document.getElementById('joining').style.display = 'block';
+      document.getElementById('playing').style.display = 'none';
+    } else {
+      controller.update_calories();
+    }
+  };
+  
+  game.Spider.prototype.draw = function() {
+    var r = this.body_radius, lr = this.leg_radius;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.strokeRect(-lr, -lr, 2*lr, 2*lr);
+    
+    ctx.fillStyle = '#222';
+    ctx.beginPath();  
+    ctx.arc(0,0,r,0,Math.PI*2, false);
+    ctx.fill(); 
+    if(this.web) {
+      var wx = this.web.length * Math.cos(this.web.alpha);
+      var wy = this.web.length * Math.sin(this.web.alpha);
+      ctx.fillStyle = 'red';
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.lineTo(wx,wy);   
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(wx,wy,r/2,0,Math.PI*2, false);   
+      ctx.stroke();
+    }
+        
+    ctx.restore();
+  };
+  
+  game.Block.prototype.draw = function() {
+    ctx.fillStyle = "#222";
+    ctx.fillRect (this.x, this.y, this.w, this.h); 
+  };
+  
+  document.getElementById('connecting').style.display = 'block';
+  document.getElementById('localBtn').addEventListener('click', function() {
+    game.start(400,400,0);
+    document.getElementById('connecting').style.display = 'none';
+    document.getElementById('joining').style.display = 'block';
+    controller.run();
+  });
+  document.getElementById('joinBtn').addEventListener('click', function() {
+    var name = document.getElementById('nameInput').value;
+    controller.active = controller.viewport.follow = game.spawn(name);
+    document.getElementById('joining').style.display = 'none';
+    document.getElementById('playing').style.display = 'block';
+    controller.update_calories();
+  });
+};
+
+function init() { controller.init(); }
+function press(e) { controller.press(e); }
+function release(e) { controller.release(e); }
+</script>
+<div id="todo">
+<h2>TODO</h2>
+<ul>
+  <li>Serwer, komunikacja z serwerem</li>
+  <li>Odtwarzacz dźwięków, dźwięki</li>
+  <li>Strzelanie pajęczyną</li>
+  <li>Muchy, Ważki</li>
+  <li>Eleganckie grafiki</li>
+  <li>Optymalizacje</li>
+  <li>Kontrola nad światem</li>
+</ul>
+</div>
+</body>
+</html>
+
